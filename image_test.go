@@ -80,6 +80,9 @@ func TestImageIsUnpacked(t *testing.T) {
 }
 
 func TestImagePullWithDistSourceLabel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
 	var (
 		source   = "docker.io"
 		repoName = "library/busybox"
@@ -229,5 +232,40 @@ func TestImageUsage(t *testing.T) {
 		t.Fatal(err)
 	} else if s <= s3 {
 		t.Fatalf("Expected actual usage with snapshots to be greater: %d <= %d", s, s3)
+	}
+}
+
+func TestImageSupportedBySnapshotter_Error(t *testing.T) {
+	var unsupportedImage string
+	if runtime.GOOS == "windows" {
+		unsupportedImage = "docker.io/library/busybox:latest"
+	} else {
+		unsupportedImage = "mcr.microsoft.com/windows/nanoserver:1809"
+	}
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	client, err := newClient(t, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	// Cleanup
+	err = client.ImageService().Delete(ctx, unsupportedImage)
+	if err != nil && !errdefs.IsNotFound(err) {
+		t.Fatal(err)
+	}
+
+	_, err = client.Pull(ctx, unsupportedImage,
+		WithSchema1Conversion,
+		WithPlatform(platforms.DefaultString()),
+		WithPullSnapshotter(DefaultSnapshotter),
+		WithPullUnpack,
+	)
+
+	if err == nil {
+		t.Fatalf("expected unpacking %s for snapshotter %s to fail", unsupportedImage, DefaultSnapshotter)
 	}
 }

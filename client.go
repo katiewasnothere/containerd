@@ -39,6 +39,7 @@ import (
 	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
 	"github.com/containerd/containerd/api/services/tasks/v1"
 	versionservice "github.com/containerd/containerd/api/services/version/v1"
+	apitypes "github.com/containerd/containerd/api/types"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/content"
 	contentproxy "github.com/containerd/containerd/content/proxy"
@@ -54,6 +55,7 @@ import (
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/containerd/services/introspection"
 	"github.com/containerd/containerd/snapshots"
 	snproxy "github.com/containerd/containerd/snapshots/proxy"
 	"github.com/containerd/typeurl"
@@ -620,11 +622,14 @@ func (c *Client) DiffService() DiffService {
 	return NewDiffServiceFromClient(diffapi.NewDiffClient(c.conn))
 }
 
-// IntrospectionService returns the underlying Introspection Client
-func (c *Client) IntrospectionService() introspectionapi.IntrospectionClient {
+// IntrospectionService returns the underlying Introspection Service
+func (c *Client) IntrospectionService() introspection.IntrospectionService {
+	if c.introspectionService != nil {
+		return c.introspectionService
+	}
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
-	return introspectionapi.NewIntrospectionClient(c.conn)
+	return introspection.NewIntrospectionServiceFromClient(introspectionapi.NewIntrospectionClient(c.conn))
 }
 
 // LeasesService returns the underlying Leases Client
@@ -706,12 +711,12 @@ func (c *Client) Server(ctx context.Context) (ServerInfo, error) {
 	}
 	c.connMu.Unlock()
 
-	response, err := c.IntrospectionService().Server(ctx, &types.Empty{})
+	uuid, err := c.IntrospectionService().Server(ctx, &types.Empty{})
 	if err != nil {
 		return ServerInfo{}, err
 	}
 	return ServerInfo{
-		UUID: response.UUID,
+		UUID: uuid,
 	}, nil
 }
 
@@ -744,6 +749,35 @@ func (c *Client) getSnapshotter(ctx context.Context, name string) (snapshots.Sna
 	}
 
 	return s, nil
+}
+
+func (c *Client) GetSnapshotterSupportedPlatforms(ctx context.Context, snapshotterName string) (platforms.MatchComparer, error) {
+	filters := []string{fmt.Sprintf("type==%s, id==%s", plugin.SnapshotPlugin, snapshotterName)}
+	in := c.IntrospectionService()
+	resp, err := in.Plugins(ctx, filters)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(resp.Plugins) <= 0 {
+		return nil, fmt.Errorf("inspection service could not find snapshotter %s plugin", snapshotterName)
+	}
+
+	sn := resp.Plugins[0]
+	snPlatforms := toPlatforms(sn.Platforms)
+	return platforms.Any(snPlatforms...), nil
+}
+
+func toPlatforms(pt []apitypes.Platform) []ocispec.Platform {
+	platforms := make([]ocispec.Platform, len(pt))
+	for i, p := range pt {
+		platforms[i] = ocispec.Platform{
+			Architecture: p.Architecture,
+			OS:           p.OS,
+			Variant:      p.Variant,
+		}
+	}
+	return platforms
 }
 
 // CheckRuntime returns true if the current runtime matches the expected

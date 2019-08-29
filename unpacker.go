@@ -26,6 +26,7 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/rootfs"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
@@ -80,6 +81,16 @@ func (u *unpacker) unpack(ctx context.Context, config ocispec.Descriptor, layers
 	diffIDs := i.RootFS.DiffIDs
 	if len(layers) != len(diffIDs) {
 		return errors.Errorf("number of layers and diffIDs don't match: %d != %d", len(layers), len(diffIDs))
+	}
+
+	imgPlatform := platforms.Normalize(ocispec.Platform{OS: i.OS, Architecture: i.Architecture})
+	snapshotterPlatformMatcher, err := u.c.GetSnapshotterSupportedPlatforms(ctx, u.snapshotter)
+	if err != nil {
+		return errors.Wrapf(err, "failed to find supported platforms for snapshotter %s", u.snapshotter)
+	}
+
+	if !snapshotterPlatformMatcher.Match(imgPlatform) {
+		return fmt.Errorf("snapshotter %s does not support platform %s for image %s", u.snapshotter, imgPlatform, config.Digest)
 	}
 
 	var (

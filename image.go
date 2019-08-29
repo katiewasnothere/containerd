@@ -18,6 +18,7 @@ package containerd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -292,7 +293,12 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string, opts ...Unpa
 		}
 	}
 
-	layers, err := i.getLayers(ctx, i.platform)
+	manifest, err := i.getManifest(ctx, i.platform)
+	if err != nil {
+		return err
+	}
+
+	layers, err := i.getLayers(ctx, i.platform, manifest)
 	if err != nil {
 		return err
 	}
@@ -312,6 +318,11 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string, opts ...Unpa
 	if err != nil {
 		return err
 	}
+	err = i.checkSnapshotterSupport(ctx, snapshotterName, manifest)
+	if err != nil {
+		return err
+	}
+
 	for _, layer := range layers {
 		unpacked, err = rootfs.ApplyLayerWithOpts(ctx, layer, chain, sn, a, config.SnapshotOpts, config.ApplyOpts)
 		if err != nil {
@@ -353,14 +364,17 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string, opts ...Unpa
 	return err
 }
 
-func (i *image) getLayers(ctx context.Context, platform platforms.MatchComparer) ([]rootfs.Layer, error) {
-	cs := i.client.ContentStore()
-
+func (i *image) getManifest(ctx context.Context, platform platforms.MatchComparer) (ocispec.Manifest, error) {
+	cs := i.ContentStore()
 	manifest, err := images.Manifest(ctx, cs, i.i.Target, platform)
 	if err != nil {
-		return nil, err
+		return ocispec.Manifest{}, err
 	}
+	return manifest, nil
+}
 
+func (i *image) getLayers(ctx context.Context, platform platforms.MatchComparer, manifest ocispec.Manifest) ([]rootfs.Layer, error) {
+	cs := i.ContentStore()
 	diffIDs, err := i.i.RootFS(ctx, cs, platform)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to resolve rootfs")
@@ -378,6 +392,37 @@ func (i *image) getLayers(ctx context.Context, platform platforms.MatchComparer)
 		layers[i].Blob = manifest.Layers[i]
 	}
 	return layers, nil
+}
+
+func (i *image) getManifestPlatform(ctx context.Context, manifest ocispec.Manifest) (ocispec.Platform, error) {
+	cs := i.ContentStore()
+	p, err := content.ReadBlob(ctx, cs, manifest.Config)
+	if err != nil {
+		return ocispec.Platform{}, err
+	}
+
+	var image ocispec.Image
+	if err := json.Unmarshal(p, &image); err != nil {
+		return ocispec.Platform{}, err
+	}
+	return platforms.Normalize(ocispec.Platform{OS: image.OS, Architecture: image.Architecture}), nil
+}
+
+func (i *image) checkSnapshotterSupport(ctx context.Context, snapshotterName string, manifest ocispec.Manifest) error {
+	snapshotterPlatformMatcher, err := i.client.GetSnapshotterSupportedPlatforms(ctx, snapshotterName)
+	if err != nil {
+		return err
+	}
+
+	manifestPlatform, err := i.getManifestPlatform(ctx, manifest)
+	if err != nil {
+		return err
+	}
+
+	if snapshotterPlatformMatcher.Match(manifestPlatform) {
+		return nil
+	}
+	return fmt.Errorf("snapshotter %s does not support platform %s for image %s", snapshotterName, manifestPlatform, manifest.Config.Digest)
 }
 
 func (i *image) ContentStore() content.Store {
